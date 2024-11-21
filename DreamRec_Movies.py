@@ -581,11 +581,12 @@ class MovieTenc(Tenc):
         h = state_hidden.squeeze()
 
         x = diff.sample(self.forward, self.forward_uncon, h, genres_embd)
+        scores = F.softmax(self.decoder(x), dim=-1)
         
-        test_item_emb = self.item_embeddings.weight
-        # scores = torch.matmul(x, test_item_emb.transpose(0, 1))
-        scores = torch.matmul(x / x.norm(dim=-1, keepdim=True), 
-                      (test_item_emb / test_item_emb.norm(dim=-1, keepdim=True)).transpose(0, 1))
+        # test_item_emb = self.item_embeddings.weight
+        # # scores = torch.matmul(x, test_item_emb.transpose(0, 1))
+        # scores = torch.matmul(x / x.norm(dim=-1, keepdim=True), 
+        #               (test_item_emb / test_item_emb.norm(dim=-1, keepdim=True)).transpose(0, 1))
 
 
         return scores
@@ -659,7 +660,7 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
         try:
             # prediction = model.predict(states, np.array(len_seq_b), diff, genre_predicted_x)
             prediction = F.softmax(predicted_items, dim=-1)
-            _, topK = prediction.topk(10, dim=1, largest=True, sorted=True)
+            _, topK = prediction.topk(20, dim=1, largest=True, sorted=True)
             topK = topK.cpu().detach().numpy()
             sorted_list2=np.flip(topK,axis=1)
             sorted_list2 = sorted_list2
@@ -690,11 +691,12 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
     
     if len(hr_list)==3 and len(ndcg_list)==3:
         print('{:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f}'.format(hr_list[0], (ndcg_list[0]), hr_list[1], (ndcg_list[1]), hr_list[2], (ndcg_list[2])))
+        
     else:
         pass
     print(f'loss:{sum(losses)/len(losses)}')
     
-    return hr_20
+    return hr_20, hr_list
 
 def load_genres_predictor(tenc, tenc_path='models/tencVG949.pth', diff_path='models/diffVG949.pth'):
     tenc.load_state_dict(torch.load(tenc_path))
@@ -828,11 +830,11 @@ if __name__ == '__main__':
             # optimizer.step()   
             
             # encoded_target = one_hot_encoding(target, item_num).to(device)       
-            
+            # assert False, model.predict(seq, len_seq, diff, genre_predicted_x).max(dim=1)
             predicted_items = model.decoder(predicted_x)
             loss2 = loss_function(predicted_items, target)
             
-            loss = loss1 + loss2
+            loss = 0.8*loss1 + 0.2*loss2
             
             loss.backward()
             optimizer.step()  
@@ -850,14 +852,16 @@ if __name__ == '__main__':
                 
                 eval_start = Time.time()
                 print('-------------------------- VAL PHRASE --------------------------')
-                _ = evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device)
+                _, hr_val= evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device)
                 print('-------------------------- TEST PHRASE -------------------------')
-                _ = evaluate(model, genre_model, genre_diff, 'test_data.df', diff, device)
+                _, hr_test= evaluate(model, genre_model, genre_diff, 'test_data.df', diff, device)
                 print("Evalution cost: " + Time.strftime("%H: %M: %S", Time.gmtime(Time.time()-eval_start)))
                 print('----------------------------------------------------------------')
 
                 torch.save(model.state_dict(), f"./models/tencV{i}.pth")
                 torch.save(diff, f"./models/diffV{i}.pth")
+                torch.save(hr_val, f"./models/hr_val{i}.pth")
+                torch.save(hr_test, f"./models/hr_val{i}.pth")
 
 
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
