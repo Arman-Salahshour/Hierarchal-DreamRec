@@ -19,6 +19,9 @@ logging.getLogger().setLevel(logging.INFO)
 def parse_args():
     parser = argparse.ArgumentParser(description="Run supervised GRU.")
 
+    parser.add_argument('--tune', action='store_true', default=False, help='Enable tuning.')
+    parser.add_argument('--no-tune', action='store_false', dest='tune', help='Disable tuning.')
+    
     parser.add_argument('--epoch', type=int, default=1000,
                         help='Number of max epochs.')
     parser.add_argument('--data', nargs='?', default='yc',
@@ -455,97 +458,159 @@ def evaluate(model, test_data, diff, device):
 
     print('{:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f}'.format(hr_list[0], (ndcg_list[0]), hr_list[1], (ndcg_list[1]), hr_list[2], (ndcg_list[2])))
     print(f'loss:{sum(losses)/len(losses)}')
-    return hr_20
+    
+    return sum(losses)/len(losses), hr_list[0]
 
+import numpy as np
+from tqdm import tqdm
+from collections import defaultdict
+class Metric:
+    def __init__(self, name, values,):
+        self.name = name
+        self.values = values
+        self.eval_dict = defaultdict(list)
+        self.bestOne = None
+    
+    def find_max_one(self):
+        best = -np.inf
+        for key in self.eval_dict.keys():
+            temp = max(self.eval_dict[key])
+            if temp > best:
+               self.bestOne = key
+               best =  temp
+
+    def find_min_one(self):
+        best = np.inf
+        for key in self.eval_dict.keys():
+            temp = min(self.eval_dict[key])
+            if temp < best:
+               self.bestOne = key
+               best =  temp
+               
+        
 
 if __name__ == '__main__':
-
-    # args = parse_args()
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
-
-    data_directory = './data/' + args.data
-    data_statis = pd.read_pickle(
-        os.path.join(data_directory, 'data_statis_g.df'))  # read data statistics, includeing seq_size and item_num
-    seq_size = data_statis['seq_size'][0]  # the length of history to define the seq
-    item_num = data_statis['item_num'][0]  # total number of items
-    topk=[5, 10, 20]
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    timesteps = args.timesteps
-
-    # args.hidden_factor = 32
-    model = Tenc(args.hidden_factor,item_num, seq_size, args.dropout_rate, args.diffuser_type, device)
-    diff = diffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
-
-    if args.optimizer == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
-    elif args.optimizer =='adamw':
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
-    elif args.optimizer =='adagrad':
-        optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
-    elif args.optimizer =='rmsprop':
-        optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
-
-    # scheduler = lr_scheduler.LinearLR(optimizer, start_factor=0.1, end_factor=1, total_iters=20)
     
-    model.to(device)
-    # optimizer.to(device)
-
-    train_data = pd.read_pickle(os.path.join(data_directory, 'train_data.df'))
+    metrics = [
+        Metric(name = 'lr', values = [0.1, 0.01, 0.001, 0.0001, 0.00001]),
+        Metric(name = 'optimizer', values = ['adam', 'adamw', 'adagrad', 'rmsprop']),
+        Metric(name = 'timesteps', values = [i*100 for i in range(1, 11)]),
+    ]
     
-    total_step=0
-    hr_max = 0
-    best_epoch = 0
-
-    num_rows=train_data.shape[0]
-    num_batches=int(num_rows/args.batch_size)
-    for i in range(args.epoch):
-        start_time = Time.time()
-        for j in range(num_batches):
-            batch = train_data.sample(n=args.batch_size).to_dict()
-            seq = list(batch['seq'].values())
-            len_seq = list(batch['len_seq'].values())
-            target=list(batch['next'].values())
+    for metric in metrics:
+        
+        for b_m in metrics:
+            if b_m.bestOne is not None:
+                if b_m.name == 'lr':
+                    args.lr = b_m.bestOne
+                elif b_m.name == 'optimizer':
+                    args.optimizer = b_m.bestOne
+                elif b_m.name == 'timesteps':
+                    args.timesteps = b_m.bestOne
+        
+        for value in tqdm(metric.values):
+            if metric.name == 'lr':
+                args.lr = value
+            elif metric.name == 'optimizer':
+                args.optimizer = value
+            elif metric.name == 'timesteps':
+                args.timesteps = value
             
-            optimizer.zero_grad()
-            seq = torch.LongTensor(seq)
-            len_seq = torch.LongTensor(len_seq)
-            target = torch.LongTensor(target)
+            # args = parse_args()
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
 
-            seq = seq.to(device)
-            target = target.to(device)
-            len_seq = len_seq.to(device)
+            data_directory = './data/' + args.data
+            data_statis = pd.read_pickle(
+                os.path.join(data_directory, 'data_statis_g.df'))  # read data statistics, includeing seq_size and item_num
+            seq_size = data_statis['seq_size'][0]  # the length of history to define the seq
+            item_num = data_statis['item_num'][0]  # total number of items
+            topk=[5, 10, 20]
 
-            x_start = model.cacu_x(target)
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            timesteps = args.timesteps
+
+            # args.hidden_factor = 32
+            model = Tenc(args.hidden_factor,item_num, seq_size, args.dropout_rate, args.diffuser_type, device)
+            diff = diffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
+
+            if args.optimizer == 'adam':
+                optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
+            elif args.optimizer =='adamw':
+                optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
+            elif args.optimizer =='adagrad':
+                model.to(device)
+                optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
+            elif args.optimizer =='rmsprop':
+                optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
+
+            # scheduler = lr_scheduler.LinearLR(optimizer, start_factor=0.1, end_factor=1, total_iters=20)
             
-            h = model.cacu_h(seq, len_seq, args.p)
+            model.to(device)
+            # optimizer.to(device)
 
-            n = torch.randint(0, args.timesteps, (args.batch_size, ), device=device).long()
-            loss, predicted_x = diff.p_losses(model, x_start, h, n, loss_type='l2')
+            train_data = pd.read_pickle(os.path.join(data_directory, 'train_data.df'))
+            
+            total_step=0
+            hr_max = 0
+            best_epoch = 0
 
-            loss.backward()
-            optimizer.step()
+            num_rows=train_data.shape[0]
+            num_batches=int(num_rows/args.batch_size)
+            for i in range(args.epoch):
+                start_time = Time.time()
+                for j in range(num_batches):
+                    batch = train_data.sample(n=args.batch_size).to_dict()
+                    seq = list(batch['seq'].values())
+                    len_seq = list(batch['len_seq'].values())
+                    target=list(batch['next'].values())
+                    
+                    optimizer.zero_grad()
+                    seq = torch.LongTensor(seq)
+                    len_seq = torch.LongTensor(len_seq)
+                    target = torch.LongTensor(target)
+
+                    seq = seq.to(device)
+                    target = target.to(device)
+                    len_seq = len_seq.to(device)
+
+                    x_start = model.cacu_x(target)
+                    
+                    h = model.cacu_h(seq, len_seq, args.p)
+
+                    n = torch.randint(0, args.timesteps, (args.batch_size, ), device=device).long()
+                    loss, predicted_x = diff.p_losses(model, x_start, h, n, loss_type='l2')
+
+                    loss.backward()
+                    optimizer.step()
 
 
-        # scheduler.step()
-        if args.report_epoch:
-            if i % 1 == 0:
-                print("Epoch {:03d}; ".format(i) + 'Train loss: {:.4f}; '.format(loss) + "Time cost: " + Time.strftime(
-                        "%H: %M: %S", Time.gmtime(Time.time()-start_time)))
+                # scheduler.step()
+                if args.report_epoch:
+                    if i % 1 == 0:
+                        print("Epoch {:03d}; ".format(i) + 'Train loss: {:.4f}; '.format(loss) + "Time cost: " + Time.strftime(
+                                "%H: %M: %S", Time.gmtime(Time.time()-start_time)))
 
-            if (i + 1) % 10 == 0:
-                
-                eval_start = Time.time()
-                print('-------------------------- VAL PHRASE --------------------------')
-                _ = evaluate(model, 'val_data.df', diff, device)
-                print('-------------------------- TEST PHRASE -------------------------')
-                _ = evaluate(model, 'test_data.df', diff, device)
-                print("Evalution cost: " + Time.strftime("%H: %M: %S", Time.gmtime(Time.time()-eval_start)))
-                print('----------------------------------------------------------------')
+                    if (i + 1) % 10 == 0:
+                        
+                        eval_start = Time.time()
+                        print('-------------------------- VAL PHRASE --------------------------')
+                        loss, hr = evaluate(model, 'val_data.df', diff, device)
+                        print('-------------------------- TEST PHRASE -------------------------')
+                        _ = evaluate(model, 'test_data.df', diff, device)
+                        print("Evalution cost: " + Time.strftime("%H: %M: %S", Time.gmtime(Time.time()-eval_start)))
+                        print('----------------------------------------------------------------')
 
-                torch.save(model.state_dict(), f"./models/tencVG{i}.pth")
-                torch.save(diff, f"./models/diffVG{i}.pth")
+                        metric.eval_dict[value].append(hr)
+                        
+                        if not args.tune:
+                            torch.save(model.state_dict(), f"./models/tencVG{i}.pth")
+                            torch.save(diff, f"./models/diffVG{i}.pth")
+        
+        if args.tune:
+            metric.find_max_one()
+            torch.save(metric, './tune/metrics.dict')
+                        
 
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
 
