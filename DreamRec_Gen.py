@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument('--tune', action='store_true', default=False, help='Enable tuning.')
     parser.add_argument('--no-tune', action='store_false', dest='tune', help='Disable tuning.')
     
-    parser.add_argument('--epoch', type=int, default=1000,
+    parser.add_argument('--epoch', type=int, default=50,
                         help='Number of max epochs.')
     parser.add_argument('--data', nargs='?', default='yc',
                         help='Arman, yc, ks, zhihu')
@@ -490,7 +490,7 @@ class Metric:
         
 
 if __name__ == '__main__':
-    
+
     metrics = [
         Metric(name = 'lr', values = [0.1, 0.01, 0.001, 0.0001, 0.00001]),
         Metric(name = 'optimizer', values = ['adam', 'adamw', 'adagrad', 'rmsprop']),
@@ -548,7 +548,7 @@ if __name__ == '__main__':
             model.to(device)
             # optimizer.to(device)
 
-            train_data = pd.read_pickle(os.path.join(data_directory, 'train_data.df'))
+            train_data = pd.read_pickle(os.path.join(data_directory, 'train_data_g.df'))
             
             total_step=0
             hr_max = 0
@@ -594,9 +594,9 @@ if __name__ == '__main__':
                         
                         eval_start = Time.time()
                         print('-------------------------- VAL PHRASE --------------------------')
-                        loss, hr = evaluate(model, 'val_data.df', diff, device)
+                        loss, hr = evaluate(model, 'val_data_g.df', diff, device)
                         print('-------------------------- TEST PHRASE -------------------------')
-                        _ = evaluate(model, 'test_data.df', diff, device)
+                        _ = evaluate(model, 'test_data_g.df', diff, device)
                         print("Evalution cost: " + Time.strftime("%H: %M: %S", Time.gmtime(Time.time()-eval_start)))
                         print('----------------------------------------------------------------')
 
