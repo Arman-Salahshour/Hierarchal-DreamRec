@@ -491,22 +491,32 @@ class Metric:
 
 if __name__ == '__main__':
 
-    metrics = [
-        Metric(name = 'lr', values = [0.1, 0.01, 0.001, 0.0001, 0.00001]),
-        Metric(name = 'optimizer', values = ['adam', 'adamw', 'adagrad', 'rmsprop']),
-        Metric(name = 'timesteps', values = [i*100 for i in range(1, 11)]),
-    ]
-    
+    if args.tune:
+        metrics = [
+            Metric(name = 'lr', values = [0.1, 0.01, 0.001, 0.0001, 0.00001]),
+            Metric(name = 'optimizer', values = ['adam', 'adamw', 'adagrad', 'rmsprop']),
+            Metric(name = 'timesteps', values = [i*100 for i in range(1, 11)]),
+        ]
+    else:
+        metrics = [
+            Metric(name = 'lr', values = [0.0001,]),
+            Metric(name = 'optimizer', values = ['adamw',]),
+            Metric(name = 'timesteps', values = [500]),
+        ] 
+        
     for metric in metrics:
         
         for b_m in metrics:
             if b_m.bestOne is not None:
                 if b_m.name == 'lr':
                     args.lr = b_m.bestOne
+                    print(f'Learning Rate: {args.lr}')
                 elif b_m.name == 'optimizer':
                     args.optimizer = b_m.bestOne
+                    print(f'Optimizer: {args.optimizer}')
                 elif b_m.name == 'timesteps':
                     args.timesteps = b_m.bestOne
+                    print(f'Timesteps: {args.timesteps}')
         
         for value in tqdm(metric.values):
             if metric.name == 'lr':
