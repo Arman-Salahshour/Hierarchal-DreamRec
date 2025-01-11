@@ -18,7 +18,10 @@ logging.getLogger().setLevel(logging.INFO)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run supervised GRU.")
-
+    
+    parser.add_argument('--tune', action='store_true', default=False, help='Enable tuning.')
+    parser.add_argument('--no-tune', action='store_false', dest='tune', help='Disable tuning.')
+    
     parser.add_argument('--epoch', type=int, default=1000,
                         help='Number of max epochs.')
     parser.add_argument('--data', nargs='?', default='yc',
@@ -592,6 +595,19 @@ class MovieTenc(Tenc):
         return scores
 
 
+def load_genres_predictor(tenc, tenc_path='models/tencVG949.pth', diff_path='models/diffVG949.pth'):
+    tenc.load_state_dict(torch.load(tenc_path))
+    diff = torch.load(diff_path)
+    
+    return tenc, diff
+
+def one_hot_encoding(target, item_num):
+    num = target.size()[0]
+    encoded_target = torch.zeros(num, item_num) 
+    for i,row in enumerate(encoded_target):
+        row[target[i]] = 1
+    return encoded_target
+
 def evaluate(model, genre_model, genre_diff, test_data, diff, device):
     eval_data=pd.read_pickle(os.path.join(data_directory, test_data))
 
@@ -696,173 +712,233 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
         pass
     print(f'loss:{sum(losses)/len(losses)}')
     
-    return hr_20, hr_list
-
-def load_genres_predictor(tenc, tenc_path='models/tencVG949.pth', diff_path='models/diffVG949.pth'):
-    tenc.load_state_dict(torch.load(tenc_path))
-    diff = torch.load(diff_path)
     
-    return tenc, diff
+    return sum(losses)/len(losses), hr_list[0]
 
-def one_hot_encoding(target, item_num):
-    num = target.size()[0]
-    encoded_target = torch.zeros(num, item_num) 
-    for i,row in enumerate(encoded_target):
-        row[target[i]] = 1
-    return encoded_target
+import numpy as np
+from tqdm import tqdm
+from collections import defaultdict
+class Metric:
+    def __init__(self, name, values,):
+        self.name = name
+        self.values = values
+        self.eval_dict = defaultdict(list)
+        self.bestOne = None
     
-if __name__ == '__main__':
+    def find_max_one(self):
+        best = -np.inf
+        for key in self.eval_dict.keys():
+            temp = max(self.eval_dict[key])
+            if temp > best:
+               self.bestOne = key
+               best =  temp
 
-    # args = parse_args()
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
-
-    data_directory = './data/' + args.data
-    data_statis = pd.read_pickle(
-        os.path.join(data_directory, 'data_statis.df'))  # read data statistics, includeing seq_size and item_num
-    seq_size = data_statis['seq_size'][0]  # the length of history to define the seq
-    item_num = data_statis['item_num'][0]  # total number of items
-    
-    """ Load Genres' Meta data"""
-    genres_data_statis = pd.read_pickle(
-        os.path.join(data_directory, 'data_statis_g.df'))
-    
-    genres_seq_size = genres_data_statis['seq_size'][0]  
-    genres_item_num = genres_data_statis['item_num'][0]
-    """"""
-    topk=[5, 10, 20]
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    timesteps = args.timesteps
-
-    #args.hidden_factor = 2048
-    model = MovieTenc(args.hidden_factor,item_num, seq_size, args.dropout_rate, args.diffuser_type, device)
-    diff = MovieDiffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
-    
-    """Load Genres' Models"""
-    genre_model = Tenc(args.hidden_factor,genres_item_num, genres_seq_size, args.dropout_rate, args.diffuser_type, device)
-    genre_diff = diffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
-    genre_model, genre_diff = load_genres_predictor(genre_model)
-    genre_model.eval()
-    
-    for parameter in genre_model.parameters():
-        parameter.requires_grad = False
+    def find_min_one(self):
+        best = np.inf
+        for key in self.eval_dict.keys():
+            temp = min(self.eval_dict[key])
+            if temp < best:
+               self.bestOne = key
+               best =  temp
+               
         
-    
-    """"""
-    
-    if args.optimizer == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
-    elif args.optimizer =='adamw':
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
-    elif args.optimizer =='adagrad':
-        optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
-    elif args.optimizer =='rmsprop':
-        optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
 
-    # scheduler = lr_scheduler.LinearLR(optimizer, start_factor=0.1, end_factor=1, total_iters=20)
-    
-    model.to(device)
-    
-    """Load the genres model into the specified device"""
-    genre_model.to(device)
-    """"""
-    # optimizer.to(device)
+if __name__ == '__main__':
+    args.alpha = 0.5
+    if args.tune:
+        metrics = [
+            Metric(name = 'timesteps', values = [500]),
+            Metric(name = 'lr', values = [0.1, 0.01, 0.001, 0.0001, 0.00001]),
+            Metric(name = 'optimizer', values = ['adam', 'adamw', 'adagrad', 'rmsprop']),
+            Metric(name = 'alpha', values = [i*0.05 for i in range(1, 21)]),
+        ]
+    else:
+        metrics = [
+            Metric(name = 'lr', values = [0.0001,]),
+            Metric(name = 'optimizer', values = ['adamw',]),
+            Metric(name = 'timesteps', values = [500]),
+            Metric(name = 'alpha', values = [0.5]),
+        ] 
+        
+    for metric in metrics:
+        
+        for b_m in metrics:
+            if b_m.bestOne is not None:
+                if b_m.name == 'lr':
+                    args.lr = b_m.bestOne
+                    print(f'Learning Rate: {args.lr}')
+                elif b_m.name == 'optimizer':
+                    args.optimizer = b_m.bestOne
+                    print(f'Optimizer: {args.optimizer}')
+                elif b_m.name == 'timesteps':
+                    args.timesteps = b_m.bestOne
+                    print(f'Timesteps: {args.timesteps}')
+                elif b_m.name == 'alpha':
+                    args.alpha = b_m.bestOne
+                    print(f'Alpha: {args.alpha}')
+        
+        for value in tqdm(metric.values):
+            if metric.name == 'lr':
+                args.lr = value
+            elif metric.name == 'optimizer':
+                args.optimizer = value
+            elif metric.name == 'timesteps':
+                args.timesteps = value
+            elif metric.name == 'alpha':
+                args.alpha = value
+                        
+            # args = parse_args()
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
 
-    train_data = pd.read_pickle(os.path.join(data_directory, 'train_data.df'))
-
-    total_step=0
-    hr_max = 0
-    best_epoch = 0
-    
-    #Loss function
-    loss_function = nn.CrossEntropyLoss()
-
-    num_rows=train_data.shape[0]
-    num_batches=int(num_rows/args.batch_size)
-    for i in range(args.epoch):
-        start_time = Time.time()
-        for j in range(num_batches):
-            batch = train_data.sample(n=args.batch_size).to_dict()
-            seq = list(batch['seq'].values())
-            len_seq = list(batch['len_seq'].values())
-            target=list(batch['next'].values())
+            data_directory = './data/' + args.data
+            data_statis = pd.read_pickle(
+                os.path.join(data_directory, 'data_statis.df'))  # read data statistics, includeing seq_size and item_num
+            seq_size = data_statis['seq_size'][0]  # the length of history to define the seq
+            item_num = data_statis['item_num'][0]  # total number of items
             
-            """Get data related to genres from the batch"""
-            genre_seq = list(batch['seq_genres'].values())
-            genre_len_seq = list(batch['len_seq'].values())
-            genre_target=list(batch['target_genre'].values())
+            """ Load Genres' Meta data"""
+            genres_data_statis = pd.read_pickle(
+                os.path.join(data_directory, 'data_statis_g.df'))
+            
+            genres_seq_size = genres_data_statis['seq_size'][0]  
+            genres_item_num = genres_data_statis['item_num'][0]
             """"""
+            topk=[5, 10, 20]
 
-            optimizer.zero_grad()
-            seq = torch.LongTensor(seq)
-            len_seq = torch.LongTensor(len_seq)
-            target = torch.LongTensor(target)
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            timesteps = args.timesteps
 
-            seq = seq.to(device)
-            target = target.to(device)
-            len_seq = len_seq.to(device)
+            #args.hidden_factor = 2048
+            model = MovieTenc(args.hidden_factor,item_num, seq_size, args.dropout_rate, args.diffuser_type, device)
+            diff = MovieDiffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
             
-            """Add genres data to specified device"""
-            genre_seq = torch.LongTensor(genre_seq)
-            genre_len_seq = torch.LongTensor(genre_len_seq)
-            genre_target = torch.LongTensor(genre_target)
-
-            genre_seq = genre_seq.to(device)
-            genre_target = genre_target.to(device)
-            genre_len_seq = genre_len_seq.to(device)
-            """"""
-
-            x_start = model.cacu_x(target)
-
-            n = torch.randint(0, args.timesteps, (args.batch_size, ), device=device).long()
-            h = model.cacu_h(seq, len_seq, args.p)
+            """Load Genres' Models"""
+            genre_model = Tenc(args.hidden_factor,genres_item_num, genres_seq_size, args.dropout_rate, args.diffuser_type, device)
+            genre_diff = diffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
+            genre_model, genre_diff = load_genres_predictor(genre_model)
+            genre_model.eval()
             
-            """Calculate x_start for genres"""
-            genre_x_start = genre_model.cacu_x(genre_target)
-            genre_h = genre_model.cacu_h(genre_seq, genre_len_seq, args.p)
-            _, genre_predicted_x= genre_diff.p_losses(genre_model, genre_x_start, genre_h, n, loss_type='l2')
-            
-            """"""
-
-
-            loss1, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, loss_type='l2')
-            # loss.backward()
-            # optimizer.step()   
-            
-            # encoded_target = one_hot_encoding(target, item_num).to(device)       
-            # assert False, model.predict(seq, len_seq, diff, genre_predicted_x).max(dim=1)
-            predicted_items = model.decoder(predicted_x)
-            loss2 = loss_function(predicted_items, target)
-            
-            loss = 0.8*loss1 + 0.2*loss2
-            
-            loss.backward()
-            optimizer.step()  
-            
-            # _ = evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device)
-
-
-        # scheduler.step()
-        if args.report_epoch:
-            if i % 1 == 0:
-                print("Epoch {:03d}; ".format(i) + 'Train loss: {:.4f}; '.format(loss) + "Time cost: " + Time.strftime(
-                        "%H: %M: %S", Time.gmtime(Time.time()-start_time)))
-
-            if (i + 1) % 10 == 0:
+            for parameter in genre_model.parameters():
+                parameter.requires_grad = False
                 
-                eval_start = Time.time()
-                print('-------------------------- VAL PHRASE --------------------------')
-                _, hr_val= evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device)
-                print('-------------------------- TEST PHRASE -------------------------')
-                _, hr_test= evaluate(model, genre_model, genre_diff, 'test_data.df', diff, device)
-                print("Evalution cost: " + Time.strftime("%H: %M: %S", Time.gmtime(Time.time()-eval_start)))
-                print('----------------------------------------------------------------')
+            
+            """"""
+            
+            if args.optimizer == 'adam':
+                optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
+            elif args.optimizer =='adamw':
+                optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
+            elif args.optimizer =='adagrad':
+                optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
+            elif args.optimizer =='rmsprop':
+                optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr, eps=1e-8, weight_decay=args.l2_decay)
 
-                torch.save(model.state_dict(), f"./models/tencV{i}.pth")
-                torch.save(diff, f"./models/diffV{i}.pth")
-                torch.save(hr_val, f"./models/hr_val{i}.pth")
-                torch.save(hr_test, f"./models/hr_val{i}.pth")
+            # scheduler = lr_scheduler.LinearLR(optimizer, start_factor=0.1, end_factor=1, total_iters=20)
+            
+            model.to(device)
+            
+            """Load the genres model into the specified device"""
+            genre_model.to(device)
+            """"""
+            # optimizer.to(device)
+
+            train_data = pd.read_pickle(os.path.join(data_directory, 'train_data.df'))
+
+            total_step=0
+            hr_max = 0
+            best_epoch = 0
+            
+            #Loss function
+            loss_function = nn.CrossEntropyLoss()
+
+            num_rows=train_data.shape[0]
+            num_batches=int(num_rows/args.batch_size)
+            for i in range(args.epoch):
+                start_time = Time.time()
+                for j in range(num_batches):
+                    batch = train_data.sample(n=args.batch_size).to_dict()
+                    seq = list(batch['seq'].values())
+                    len_seq = list(batch['len_seq'].values())
+                    target=list(batch['next'].values())
+                    
+                    """Get data related to genres from the batch"""
+                    genre_seq = list(batch['seq_genres'].values())
+                    genre_len_seq = list(batch['len_seq'].values())
+                    genre_target=list(batch['target_genre'].values())
+                    """"""
+
+                    optimizer.zero_grad()
+                    seq = torch.LongTensor(seq)
+                    len_seq = torch.LongTensor(len_seq)
+                    target = torch.LongTensor(target)
+
+                    seq = seq.to(device)
+                    target = target.to(device)
+                    len_seq = len_seq.to(device)
+                    
+                    """Add genres data to specified device"""
+                    genre_seq = torch.LongTensor(genre_seq)
+                    genre_len_seq = torch.LongTensor(genre_len_seq)
+                    genre_target = torch.LongTensor(genre_target)
+
+                    genre_seq = genre_seq.to(device)
+                    genre_target = genre_target.to(device)
+                    genre_len_seq = genre_len_seq.to(device)
+                    """"""
+
+                    x_start = model.cacu_x(target)
+
+                    n = torch.randint(0, args.timesteps, (args.batch_size, ), device=device).long()
+                    h = model.cacu_h(seq, len_seq, args.p)
+                    
+                    """Calculate x_start for genres"""
+                    genre_x_start = genre_model.cacu_x(genre_target)
+                    genre_h = genre_model.cacu_h(genre_seq, genre_len_seq, args.p)
+                    _, genre_predicted_x= genre_diff.p_losses(genre_model, genre_x_start, genre_h, n, loss_type='l2')
+                    
+                    """"""
 
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+                    loss1, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, loss_type='l2')
+                    # loss.backward()
+                    # optimizer.step()   
+                    
+                    # encoded_target = one_hot_encoding(target, item_num).to(device)       
+                    # assert False, model.predict(seq, len_seq, diff, genre_predicted_x).max(dim=1)
+                    predicted_items = model.decoder(predicted_x)
+                    loss2 = loss_function(predicted_items, target)
+                    
+                    loss = (args.alpha*loss1) + ((1-args.alpha)*loss2)
+                    
+                    loss.backward()
+                    optimizer.step()  
+                    
+                    # _ = evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device)
+
+
+                # scheduler.step()
+                if args.report_epoch:
+                    if i % 1 == 0:
+                        print("Epoch {:03d}; ".format(i) + 'Train loss: {:.4f}; '.format(loss) + "Time cost: " + Time.strftime(
+                                "%H: %M: %S", Time.gmtime(Time.time()-start_time)))
+
+                    if (i + 1) % 10 == 0:
+                        
+                        eval_start = Time.time()
+                        print('-------------------------- VAL PHRASE --------------------------')
+                        _, hr_val= evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device)
+                        print('-------------------------- TEST PHRASE -------------------------')
+                        _, hr_test= evaluate(model, genre_model, genre_diff, 'test_data.df', diff, device)
+                        print("Evalution cost: " + Time.strftime("%H: %M: %S", Time.gmtime(Time.time()-eval_start)))
+                        print('----------------------------------------------------------------')
+
+                        metric.eval_dict[value].append(hr_val)
+                        
+                        if not args.tune:
+                            torch.save(model.state_dict(), f"./models/tencV{i}.pth")
+                            torch.save(diff, f"./models/diffV{i}.pth")
+        
+        if args.tune:
+            metric.find_max_one()
+            torch.save(metric, './tune/metrics_m.dict')                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
 
