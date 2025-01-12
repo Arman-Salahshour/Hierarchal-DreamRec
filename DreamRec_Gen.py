@@ -497,13 +497,14 @@ if __name__ == '__main__':
             Metric(name = 'optimizer', values = ['adam', 'adamw', 'adagrad', 'rmsprop']),
             Metric(name = 'timesteps', values = [i*100 for i in range(1, 11)]),
         ]
+        best_metrics = list()
     else:
         metrics = [
             Metric(name = 'lr', values = [0.0001,]),
             Metric(name = 'optimizer', values = ['adamw',]),
             Metric(name = 'timesteps', values = [500]),
         ] 
-        
+    
     for metric in metrics:
         
         for b_m in metrics:
@@ -618,7 +619,8 @@ if __name__ == '__main__':
         
         if args.tune:
             metric.find_max_one()
-            torch.save(metric, './tune/metrics.dict')
+            best_metrics.append(metric)
+            torch.save(best_metrics, './tune/metrics.dict')
                         
 
 

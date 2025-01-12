@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument('--tune', action='store_true', default=False, help='Enable tuning.')
     parser.add_argument('--no-tune', action='store_false', dest='tune', help='Disable tuning.')
     
-    parser.add_argument('--epoch', type=int, default=1000,
+    parser.add_argument('--epoch', type=int, default=50,
                         help='Number of max epochs.')
     parser.add_argument('--data', nargs='?', default='yc',
                         help='Arman, yc, ks, zhihu')
@@ -595,7 +595,7 @@ class MovieTenc(Tenc):
         return scores
 
 
-def load_genres_predictor(tenc, tenc_path='models/tencVG949.pth', diff_path='models/diffVG949.pth'):
+def load_genres_predictor(tenc, tenc_path='models/tencVG49.pth', diff_path='models/diffVG49.pth'):
     tenc.load_state_dict(torch.load(tenc_path))
     diff = torch.load(diff_path)
     
@@ -659,9 +659,11 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
         genre_len_seq_b = genre_len_seq_b.to(device)
         
         n = torch.randint(0, args.timesteps, (batch_size, ), device=device).long()
+        n_g = torch.randint(0, 500, (batch_size, ), device=device).long()
+        
         genre_x_start = genre_model.cacu_x(genre_target_b)
         genre_h = genre_model.cacu_h(genre_seq_b, genre_len_seq_b, args.p)
-        _, genre_predicted_x= genre_diff.p_losses(genre_model, genre_x_start, genre_h, n, loss_type='l2')
+        _, genre_predicted_x= genre_diff.p_losses(genre_model, genre_x_start, genre_h, n_g, loss_type='l2')
         """"""
 
         loss, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, loss_type='l2')
@@ -747,32 +749,32 @@ if __name__ == '__main__':
     args.alpha = 0.5
     if args.tune:
         metrics = [
-            Metric(name = 'timesteps', values = [500]),
+            Metric(name = 'timesteps', values = [i*100 for i in range(1, 11)]),
             Metric(name = 'lr', values = [0.1, 0.01, 0.001, 0.0001, 0.00001]),
             Metric(name = 'optimizer', values = ['adam', 'adamw', 'adagrad', 'rmsprop']),
             Metric(name = 'alpha', values = [i*0.05 for i in range(1, 21)]),
         ]
+        best_metrics = list()
     else:
         metrics = [
+            Metric(name = 'timesteps', values = [500]),
             Metric(name = 'lr', values = [0.0001,]),
             Metric(name = 'optimizer', values = ['adamw',]),
-            Metric(name = 'timesteps', values = [500]),
             Metric(name = 'alpha', values = [0.5]),
         ] 
         
     for metric in metrics:
-        
         for b_m in metrics:
             if b_m.bestOne is not None:
-                if b_m.name == 'lr':
+                if b_m.name == 'timesteps':
+                    args.timesteps = b_m.bestOne
+                    print(f'Timesteps: {args.timesteps}')
+                elif b_m.name == 'lr':
                     args.lr = b_m.bestOne
                     print(f'Learning Rate: {args.lr}')
                 elif b_m.name == 'optimizer':
                     args.optimizer = b_m.bestOne
                     print(f'Optimizer: {args.optimizer}')
-                elif b_m.name == 'timesteps':
-                    args.timesteps = b_m.bestOne
-                    print(f'Timesteps: {args.timesteps}')
                 elif b_m.name == 'alpha':
                     args.alpha = b_m.bestOne
                     print(f'Alpha: {args.alpha}')
@@ -814,7 +816,7 @@ if __name__ == '__main__':
             
             """Load Genres' Models"""
             genre_model = Tenc(args.hidden_factor,genres_item_num, genres_seq_size, args.dropout_rate, args.diffuser_type, device)
-            genre_diff = diffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
+            genre_diff = diffusion(500, args.beta_start, args.beta_end, args.w)
             genre_model, genre_diff = load_genres_predictor(genre_model)
             genre_model.eval()
             
@@ -889,12 +891,13 @@ if __name__ == '__main__':
                     x_start = model.cacu_x(target)
 
                     n = torch.randint(0, args.timesteps, (args.batch_size, ), device=device).long()
+                    n_g = torch.randint(0, 500, (args.batch_size, ), device=device).long()
                     h = model.cacu_h(seq, len_seq, args.p)
                     
                     """Calculate x_start for genres"""
                     genre_x_start = genre_model.cacu_x(genre_target)
                     genre_h = genre_model.cacu_h(genre_seq, genre_len_seq, args.p)
-                    _, genre_predicted_x= genre_diff.p_losses(genre_model, genre_x_start, genre_h, n, loss_type='l2')
+                    _, genre_predicted_x= genre_diff.p_losses(genre_model, genre_x_start, genre_h, n_g, loss_type='l2')
                     
                     """"""
 
@@ -940,5 +943,6 @@ if __name__ == '__main__':
         
         if args.tune:
             metric.find_max_one()
-            torch.save(metric, './tune/metrics_m.dict')                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
+            best_metrics.append(metric)
+            torch.save(best_metrics, './tune/metrics_m.dict')                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
 
