@@ -584,7 +584,7 @@ class MovieTenc(Tenc):
         h = state_hidden.squeeze()
 
         x = diff.sample(self.forward, self.forward_uncon, h, genres_embd)
-        scores = F.softmax(self.decoder(x), dim=-1)
+        # scores = F.softmax(self.decoder(x), dim=-1)
         
         # test_item_emb = self.item_embeddings.weight
         # # scores = torch.matmul(x, test_item_emb.transpose(0, 1))
@@ -592,7 +592,7 @@ class MovieTenc(Tenc):
         #               (test_item_emb / test_item_emb.norm(dim=-1, keepdim=True)).transpose(0, 1))
 
 
-        return scores
+        return self.decoder(x)
 
 
 def load_genres_predictor(tenc, tenc_path='models/tencVG49.pth', diff_path='models/diffVG49.pth'):
@@ -668,7 +668,8 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
 
         loss, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, loss_type='l2')
 
-        predicted_items = model.decoder(predicted_x)
+        # predicted_items = model.decoder(predicted_x)
+        predicted_items = model.predict(seq_t, len_seq_t, diff, genre_predicted_x)
         # loss = loss_function(predicted_items, target_t)
         
         losses.append(loss.item())
@@ -743,7 +744,6 @@ class Metric:
                self.bestOne = key
                best =  temp
                
-        
 
 if __name__ == '__main__':
     args.alpha = 0.5
@@ -901,14 +901,14 @@ if __name__ == '__main__':
                     
                     """"""
 
-
                     loss1, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, loss_type='l2')
+                    predicted_items = model.predict(seq, len_seq, diff, genre_predicted_x)
                     # loss.backward()
                     # optimizer.step()   
                     
                     # encoded_target = one_hot_encoding(target, item_num).to(device)       
                     # assert False, model.predict(seq, len_seq, diff, genre_predicted_x).max(dim=1)
-                    predicted_items = model.decoder(predicted_x)
+                    # predicted_items = model.decoder(predicted_x)
                     loss2 = loss_function(predicted_items, target)
                     
                     loss = (args.alpha*loss1) + ((1-args.alpha)*loss2)
