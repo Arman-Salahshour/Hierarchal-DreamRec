@@ -608,7 +608,7 @@ def one_hot_encoding(target, item_num):
         row[target[i]] = 1
     return encoded_target
 
-def evaluate(model, genre_model, genre_diff, test_data, diff, device):
+def evaluate(model, genre_model, genre_diff, test_data, diff, device, alpha):
     eval_data=pd.read_pickle(os.path.join(data_directory, test_data))
 
     batch_size = 100
@@ -666,11 +666,15 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
         _, genre_predicted_x= genre_diff.p_losses(genre_model, genre_x_start, genre_h, n_g, loss_type='l2')
         """"""
 
-        loss, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, loss_type='l2')
+        loss1, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, loss_type='l2')
 
         # predicted_items = model.decoder(predicted_x)
         predicted_items = model.predict(seq_t, len_seq_t, diff, genre_predicted_x)
         # loss = loss_function(predicted_items, target_t)
+
+        loss2 = loss_function(predicted_items, target_t)
+                    
+        loss = (args.alpha*loss1) + ((1-args.alpha)*loss2)
         
         losses.append(loss.item())
         
@@ -682,7 +686,7 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
             _, topK = prediction.topk(20, dim=1, largest=True, sorted=True)
             topK = topK.cpu().detach().numpy()
             sorted_list2=np.flip(topK,axis=1)
-            sorted_list2 = sorted_list2
+            
             calculate_hit(sorted_list2,topk,target_b,hit_purchase,ndcg_purchase)
         except:
             pass
@@ -929,9 +933,9 @@ if __name__ == '__main__':
                         
                         eval_start = Time.time()
                         print('-------------------------- VAL PHRASE --------------------------')
-                        _, hr_val= evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device)
+                        _, hr_val= evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device, args.alpha)
                         print('-------------------------- TEST PHRASE -------------------------')
-                        _, hr_test= evaluate(model, genre_model, genre_diff, 'test_data.df', diff, device)
+                        _, hr_test= evaluate(model, genre_model, genre_diff, 'test_data.df', diff, device, args.alpha)
                         print("Evalution cost: " + Time.strftime("%H: %M: %S", Time.gmtime(Time.time()-eval_start)))
                         print('----------------------------------------------------------------')
 
