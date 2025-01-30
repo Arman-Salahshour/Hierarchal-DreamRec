@@ -22,13 +22,13 @@ def parse_args():
     parser.add_argument('--tune', action='store_true', default=False, help='Enable tuning.')
     parser.add_argument('--no-tune', action='store_false', dest='tune', help='Disable tuning.')
     
-    parser.add_argument('--epoch', type=int, default=50,
+    parser.add_argument('--epoch', type=int, default=100,
                         help='Number of max epochs.')
     parser.add_argument('--data', nargs='?', default='yc',
                         help='Arman, yc, ks, zhihu')
     parser.add_argument('--random_seed', type=int, default=100,
                         help='random seed')
-    parser.add_argument('--batch_size', type=int, default=256,
+    parser.add_argument('--batch_size', type=int, default=512,
                         help='Batch size.')
     parser.add_argument('--layers', type=int, default=1,
                         help='gru_layers')
@@ -40,9 +40,9 @@ def parse_args():
                         help='beta end of diffusion')
     parser.add_argument('--beta_start', type=float, default=0.0001,
                         help='beta start of diffusion')
-    parser.add_argument('--lr', type=float, default=0.005,
+    parser.add_argument('--lr', type=float, default=0.001,
                         help='Learning rate.')
-    parser.add_argument('--l2_decay', type=float, default=0,
+    parser.add_argument('--l2_decay', type=float, default=1e-6,
                         help='l2 loss reg coef.')
     parser.add_argument('--cuda', type=int, default=0,
                         help='cuda device.')
@@ -394,15 +394,15 @@ class Tenc(nn.Module):
 def evaluate(model, test_data, diff, device):
     eval_data=pd.read_pickle(os.path.join(data_directory, test_data))
 
-    batch_size = 100
+    batch_size = 512
     evaluated=0
     total_clicks=1.0
     total_purchase = 0.0
     total_reward = [0, 0, 0, 0]
     hit_clicks=[0,0,0,0]
     ndcg_clicks=[0,0,0,0]
-    hit_purchase=[0,0,0,0]
-    ndcg_purchase=[0,0,0,0]
+    hit_purchase = np.zeros(len(topk))
+    ndcg_purchase = np.zeros(len(topk))
 
     seq, len_seq, target = list(eval_data['seq'].values), list(eval_data['len_seq'].values), list(eval_data['next'].values)
 
@@ -416,13 +416,10 @@ def evaluate(model, test_data, diff, device):
         states = states.to(device)
 
         """"""
-        seq_t = torch.LongTensor(seq_b)
-        len_seq_t = torch.LongTensor(len_seq_b)
-        target_t = torch.LongTensor(target_b)
+        seq_t = torch.LongTensor(seq_b).to(device)
+        len_seq_t = torch.LongTensor(len_seq_b).to(device)
+        target_t = torch.LongTensor(target_b).to(device)
 
-        seq_t = seq_t.to(device)
-        target_t = target_t.to(device)
-        len_seq_t = len_seq_t.to(device)
 
         x_start = model.cacu_x(target_t)
         
@@ -438,7 +435,8 @@ def evaluate(model, test_data, diff, device):
         topK = topK.cpu().detach().numpy()
         sorted_list2=np.flip(topK,axis=1)
         sorted_list2 = sorted_list2
-        calculate_hit(sorted_list2,topk,target_b,hit_purchase,ndcg_purchase)
+        target_b = torch.LongTensor(target_b).to(device)
+        calculate_hit(target_b, topK, topk, hit_purchase, ndcg_purchase)
 
         total_purchase+=batch_size
  
@@ -449,12 +447,8 @@ def evaluate(model, test_data, diff, device):
     for i in range(len(topk)):
         hr_purchase=hit_purchase[i]/total_purchase
         ng_purchase=ndcg_purchase[i]/total_purchase
-
         hr_list.append(hr_purchase)
-        ndcg_list.append(ng_purchase[0,0])
-
-        if i == 1:
-            hr_20 = hr_purchase
+        ndcg_list.append(ng_purchase)
 
     print('{:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f} {:<10.6f}'.format(hr_list[0], (ndcg_list[0]), hr_list[1], (ndcg_list[1]), hr_list[2], (ndcg_list[2])))
     print(f'loss:{sum(losses)/len(losses)}')
@@ -499,10 +493,10 @@ if __name__ == '__main__':
         ]
         best_metrics = list()
     else:
+        args.lr = 0.001
+        args.optimizer = 'adam'
         metrics = [
-            Metric(name = 'lr', values = [0.0001,]),
-            Metric(name = 'optimizer', values = ['adamw',]),
-            Metric(name = 'timesteps', values = [500]),
+            Metric(name = 'timesteps', values = [600]),
         ] 
     
     for metric in metrics:
@@ -625,4 +619,3 @@ if __name__ == '__main__':
 
 
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
-
