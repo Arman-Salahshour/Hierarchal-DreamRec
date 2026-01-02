@@ -1,4 +1,4 @@
-#Hierarchal DreamRec
+# Hierarchal DreamRec
 
 This repository is based on *Reshaping Sequential Recommendation via Guided Diffusion* presented at NeurIPS 2023 ([arXiv link](https://arxiv.org/abs/2310.20453)) by Zhengyi Yang, Jiancan Wu, Zhicai Wang, Xiang Wang, Yancheng Yuan, and Xiangnan He. In their work, they introduce a guided diffusion recommender system called DreamRec. 
 
