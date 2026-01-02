@@ -1,6 +1,8 @@
 import argparse
 import pandas as pd
 from tqdm import tqdm
+import random
+from pathlib import Path
 
 
 class MoviesDataBuilder:
@@ -84,3 +86,62 @@ class MoviesDataBuilder:
             'genres': meta
         })
         self.dataset.to_csv(self.output_path, index=False)
+
+
+
+
+
+
+
+
+
+class GenresDataBuilder:
+    def __init__(
+        self,
+        processed_data_file='movie_dataset/processed_dataset.csv',
+        movie_meta_data_path='movie_dataset/movie.csv',
+        seq_len=10,
+    ):
+        self.seq_len = seq_len
+
+        df = pd.read_csv(processed_data_file)
+        self.movie_meta = pd.read_csv(movie_meta_data_path)
+
+        genres = set()
+        for row in df.genres:
+            for g in row.split('|'):
+                for sub in g.split(','):
+                    genres.add(sub)
+
+        self.genres_meta = pd.DataFrame(
+            enumerate(sorted(genres), start=1),
+            columns=['genre_id', 'genre']
+        )
+
+        out_path = Path(processed_data_file).parent / 'genres.csv'
+        self.genres_meta.to_csv(out_path, index=False)
+
+        df = df.apply(self.encode_genres, axis=1)
+        df.to_csv(processed_data_file, index=False)
+
+    def encode_genres(self, row):
+        seq_genres = []
+        for block in row.genres.split('|'):
+            choices = block.split(',')
+            genre = random.choice(choices)
+            gid = self.genres_meta[self.genres_meta.genre == genre].genre_id.values[0]
+            seq_genres.append(int(gid))
+
+        while len(seq_genres) < self.seq_len:
+            seq_genres.append(seq_genres[-1])
+
+        row['seq_genres'] = seq_genres
+
+        target_genres = self.movie_meta[self.movie_meta.movieId == row.target].genres.values[0]
+        target = random.choice(target_genres.split('|'))
+        row['target_genre'] = int(
+            self.genres_meta[self.genres_meta.genre == target].genre_id.values[0]
+        )
+
+        return row
+
