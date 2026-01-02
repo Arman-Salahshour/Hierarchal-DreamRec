@@ -10,6 +10,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 import os
 import logging
 import time as Time
+import json 
 
 # Torch Data Utilities
 from torch.utils.data import Dataset, DataLoader
@@ -28,6 +29,7 @@ logging.getLogger().setLevel(logging.INFO)
 def parse_args():
     parser = argparse.ArgumentParser(description="Run DreamRec with Diffusion + Cross-Entropy.")
 
+    parser.add_argument('--train', action='store_true', default=False, help='Enable training.')
     parser.add_argument('--tune', action='store_true', default=False, help='Enable tuning.')
     parser.add_argument('--no-tune', action='store_false', dest='tune', help='Disable tuning.')
 
@@ -227,18 +229,16 @@ class diffusion():
         return x
 
 
-class MovieDiffusion(diffusion):
-    """Subclass to incorporate an extra 'genres_embd' in the forward pass."""
 
+class MovieDiffusion(diffusion):
     def __init__(self, timesteps, beta_start, beta_end, w):
         super().__init__(timesteps, beta_start, beta_end, w)
 
     def p_losses(self, denoise_model, x_start, h, t, genres_embd, noise=None, loss_type="l2"):
         if noise is None:
             noise = torch.randn_like(x_start)
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        x_noisy = self.q_sample(x_start, t, noise)
         predicted_x = denoise_model(x_noisy, h, t, genres_embd)
-
         if loss_type == 'l1':
             loss = F.l1_loss(x_start, predicted_x)
         elif loss_type == 'l2':
@@ -253,10 +253,8 @@ class MovieDiffusion(diffusion):
     def p_sample(self, model_forward, model_forward_uncon, x, h, t, t_index, genres_embd):
         x_start = (1 + self.w) * model_forward(x, h, t, genres_embd) - self.w * model_forward_uncon(x, t, genres_embd)
         x_t = x
-        model_mean = (
-                extract(self.posterior_mean_coef1, t, x_t.shape) * x_start
-                + extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
-        )
+        model_mean = extract(self.posterior_mean_coef1, t, x_t.shape) * x_start + \
+                     extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
         if t_index == 0:
             return model_mean
         else:
@@ -267,16 +265,9 @@ class MovieDiffusion(diffusion):
     @torch.no_grad()
     def sample(self, model_forward, model_forward_uncon, h, genres_embd):
         x = torch.randn_like(h)
-        for n in reversed(range(0, self.timesteps)):
-            x = self.p_sample(
-                model_forward,
-                model_forward_uncon,
-                x,
-                h,
-                torch.full((h.shape[0],), n, device=h.device, dtype=torch.long),
-                n,
-                genres_embd
-            )
+        for n in reversed(range(self.timesteps)):
+            x = self.p_sample(model_forward, model_forward_uncon, x, h,
+                              torch.full((h.shape[0],), n, device=h.device, dtype=torch.long), n, genres_embd)
         return x
 
 
@@ -418,31 +409,43 @@ class Tenc(nn.Module):
         scores = torch.matmul(x, test_item_emb.transpose(0, 1))
         return scores
 
-
 class MovieTenc(Tenc):
-    """MovieTenc uses additional 'genres_embd' in the forward pass."""
-
     def __init__(self, hidden_size, item_num, state_size, dropout, diffuser_type, device, num_heads=1):
         super(Tenc, self).__init__()
         self.state_size = state_size
         self.hidden_size = hidden_size
         self.item_num = int(item_num)
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(dropout)
         self.diffuser_type = diffuser_type
         self.device = device
-        self.item_embeddings = nn.Embedding(num_embeddings=item_num + 1, embedding_dim=hidden_size)
+        self.item_embeddings = nn.Embedding(
+            num_embeddings=item_num + 1,
+            embedding_dim=hidden_size,
+        )
         nn.init.normal_(self.item_embeddings.weight, 0, 1)
-        self.none_embedding = nn.Embedding(num_embeddings=1, embedding_dim=self.hidden_size)
+        self.none_embedding = nn.Embedding(
+            num_embeddings=1,
+            embedding_dim=self.hidden_size,
+        )
         nn.init.normal_(self.none_embedding.weight, 0, 1)
-        self.positional_embeddings = nn.Embedding(num_embeddings=state_size, embedding_dim=hidden_size)
-        self.emb_dropout = nn.Dropout(0.3)
+        self.positional_embeddings = nn.Embedding(
+            num_embeddings=state_size,
+            embedding_dim=hidden_size
+        )
+        # emb_dropout is added
+        self.emb_dropout = nn.Dropout(dropout)
         self.ln_1 = nn.LayerNorm(hidden_size)
         self.ln_2 = nn.LayerNorm(hidden_size)
         self.ln_3 = nn.LayerNorm(hidden_size)
         self.mh_attn = MultiHeadAttention(hidden_size, hidden_size, num_heads, dropout)
         self.feed_forward = PositionwiseFeedForward(hidden_size, hidden_size, dropout)
         self.s_fc = nn.Linear(hidden_size, item_num)
-        self.embedding_dropout = nn.Dropout(0.3)  # Dropout for embeddings
+        # self.ac_func = nn.ReLU()
+
+        # self.step_embeddings = nn.Embedding(
+        #     num_embeddings=50,
+        #     embedding_dim=hidden_size
+        # )
 
         self.step_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(self.hidden_size),
@@ -450,28 +453,36 @@ class MovieTenc(Tenc):
             nn.GELU(),
             nn.Linear(self.hidden_size * 2, self.hidden_size),
         )
+
         self.emb_mlp = nn.Sequential(
             nn.SiLU(),
             nn.Linear(self.hidden_size, self.hidden_size * 2)
         )
+
         self.diff_mlp = nn.Sequential(
             nn.Linear(self.hidden_size * 4, self.hidden_size * 2),
             nn.GELU(),
             nn.Linear(self.hidden_size * 2, self.hidden_size),
         )
 
-        # Diffuser
         if self.diffuser_type == 'mlp1':
             self.diffuser = nn.Sequential(
                 nn.Linear(self.hidden_size * 4, self.hidden_size)
             )
+
             self.decoder = nn.Sequential(
-                nn.Linear(self.hidden_size, self.hidden_size * 4),
+                nn.Linear(self.hidden_size, self.hidden_size * 2),
                 nn.ReLU(),
-                nn.Linear(self.hidden_size * 4, self.hidden_size),
+                nn.Linear(self.hidden_size * 2, self.hidden_size * 4),
+                nn.ReLU(),
+                nn.Linear(self.hidden_size * 4, self.hidden_size * 2),
+                nn.ReLU(),
+                nn.Linear(self.hidden_size * 2, self.hidden_size),
                 nn.ReLU(),
                 nn.Linear(self.hidden_size, self.item_num),
+                # nn.Softmax(dim=-1),
             )
+
         elif self.diffuser_type == 'mlp2':
             self.diffuser = nn.Sequential(
                 nn.Linear(self.hidden_size * 4, self.hidden_size * 2),
@@ -488,25 +499,63 @@ class MovieTenc(Tenc):
                 nn.Linear(self.hidden_size * 2, self.hidden_size),
                 nn.ReLU(),
                 nn.Linear(self.hidden_size, self.item_num),
+                # nn.Softmax(dim=-1),
             )
 
     def cacu_x(self, x):
-        return self.item_embeddings(x)
+        x = self.item_embeddings(x)
+        return x
 
     def forward(self, x, h, step, genres_embd):
+
         t = self.step_mlp(step)
-        cat_in = torch.cat((x, h, t, genres_embd), dim=1)
-        return self.diffuser(cat_in)
+
+        if self.diffuser_type == 'mlp1':
+            res = self.diffuser(torch.cat((x, h, t, genres_embd), dim=1))
+        elif self.diffuser_type == 'mlp2':
+            res = self.diffuser(torch.cat((x, h, t, genres_embd), dim=1))
+        return res
 
     def forward_uncon(self, x, step, genres_embd):
         h = self.none_embedding(torch.tensor([0]).to(self.device))
-        h = torch.cat([h.view(1, self.hidden_size)] * x.shape[0], dim=0)
-        t = self.step_mlp(step)
-        cat_in = torch.cat((x, h, t, genres_embd), dim=1)
-        return self.diffuser(cat_in)
+        h = torch.cat([h.view(1, 64)] * x.shape[0], dim=0)
 
+        t = self.step_mlp(step)
+
+        if self.diffuser_type == 'mlp1':
+            res = self.diffuser(torch.cat((x, h, t, genres_embd), dim=1))
+        elif self.diffuser_type == 'mlp2':
+            res = self.diffuser(torch.cat((x, h, t, genres_embd), dim=1))
+
+        return res
+
+    # def predict(self, states, len_states, diff, genres_embd):
+    #     #hidden
+    #     inputs_emb = self.item_embeddings(states)
+    #     inputs_emb += self.positional_embeddings(torch.arange(self.state_size).to(self.device))
+    #     seq = self.emb_dropout(inputs_emb)
+    #     mask = torch.ne(states, self.item_num).float().unsqueeze(-1).to(self.device)
+    #     seq *= mask
+    #     seq_normalized = self.ln_1(seq)
+    #     mh_attn_out = self.mh_attn(seq_normalized, seq)
+    #     ff_out = self.feed_forward(self.ln_2(mh_attn_out))
+    #     ff_out *= mask
+    #     ff_out = self.ln_3(ff_out)
+    #     state_hidden = extract_axis_1(ff_out, len_states - 1)
+    #     h = state_hidden.squeeze()
+
+    #     x = diff.sample(self.forward, self.forward_uncon, h, genres_embd)
+    #     # scores = F.softmax(self.decoder(x), dim=-1)
+        
+    #     # test_item_emb = self.item_embeddings.weight
+    #     # # scores = torch.matmul(x, test_item_emb.transpose(0, 1))
+    #     # scores = torch.matmul(x / x.norm(dim=-1, keepdim=True), 
+    #     #               (test_item_emb / test_item_emb.norm(dim=-1, keepdim=True)).transpose(0, 1))
+
+
+    #     return self.decoder(x)
     def predict(self, states, len_states, diff, genres_embd):
-        """Predict with final decode (softmax)."""
+        # hidden
         inputs_emb = self.item_embeddings(states)
         inputs_emb += self.positional_embeddings(torch.arange(self.state_size).to(self.device))
         seq = self.emb_dropout(inputs_emb)
@@ -518,12 +567,26 @@ class MovieTenc(Tenc):
         ff_out = self.feed_forward(self.ln_2(mh_attn_out))
         ff_out *= mask
         ff_out = self.ln_3(ff_out)
+
         state_hidden = extract_axis_1(ff_out, len_states - 1)
-        h = state_hidden.squeeze()
+
+        # --- FIX SHAPES HERE ---
+        # state_hidden might be [B, 1, H]. Squeeze that middle dim.
+        if state_hidden.dim() == 3:
+            # [B, 1, H] -> [B, H]
+            state_hidden = state_hidden.squeeze(1)
+
+        # Handle both B > 1 and B == 1
+        if state_hidden.dim() == 1:
+            # [H] -> [1, H]
+            h = state_hidden.unsqueeze(0)
+        else:
+            # [B, H]
+            h = state_hidden
+        # --- END FIX ---
 
         x = diff.sample(self.forward, self.forward_uncon, h, genres_embd)
-        scores = F.softmax(self.decoder(x), dim=-1)
-        return scores
+        return self.decoder(x)
 
 
 ##############################################################################
@@ -531,7 +594,7 @@ class MovieTenc(Tenc):
 ##############################################################################
 def load_genres_predictor(tenc, tenc_path='models/tencVG49.pth', diff_path='models/diffVG49.pth'):
     tenc.load_state_dict(torch.load(tenc_path))
-    diff = torch.load(diff_path)
+    diff = torch.load(diff_path, weights_only=False)
     return tenc, diff
 
 
@@ -644,12 +707,178 @@ class NoiseConditionalScoreLoss(nn.Module):
         return loss
 
 
+def suggest_items(user_items, user_genres, device):
+    """
+    High-level helper for inference.
+
+    NOTE: we deliberately run the recommendation pipeline on CPU to avoid
+    CUDA/CPU device mismatches with the saved diffusion checkpoints.
+    Training can still use GPU as before.
+    """
+    # Force CPU device for inference
+    infer_device = torch.device("cpu")
+
+    data_directory = './data/' + args.data
+
+    # Build / load genre model and its diffusion on CPU
+    genre_model, genre_diff = build_genre_model(infer_device, data_directory)
+
+    # Build main movie model + diffusion on CPU
+    model, diff, _ = build_movie_model_and_optimizer(infer_device, data_directory)
+
+    # Load trained weights on CPU
+    model.load_state_dict(torch.load("models/tenc_best_single.pth",
+                                     map_location=infer_device))
+    diff = torch.load("models/diff_best_single.pth",
+                      map_location=infer_device,
+                      weights_only=False)
+
+    model.to(infer_device)
+    model.eval()
+    genre_model.to(infer_device)
+    genre_model.eval()
+
+    # Call recommender
+    top_ids, top_scores = recommend_for_user(
+        model=model,
+        diff=diff,
+        genre_model=genre_model,
+        genre_diff=genre_diff,
+        user_item_seq=user_items,
+        user_genre_seq=user_genres,
+        device=infer_device,   # IMPORTANT: we use CPU here
+        topk=20
+    )
+    return top_ids, top_scores
+
+
+def recommend_for_user(
+    model,
+    diff,
+    genre_model,
+    genre_diff,
+    user_item_seq,       # can be [i1, i2, ...] or [[i1, i2, ...]]
+    user_genre_seq,      # same as above
+    device,
+    topk=20
+):
+    """
+    Returns the top-k recommended item IDs (and their scores) for a single user.
+
+    - Keeps cacu_h unchanged.
+    - Uses a fake batch size = 2 for the genre model to avoid the B=1 bug.
+    - Runs everything on the given 'device' (which we set to CPU in suggest_items),
+      so there are no CUDA/CPU mismatches with older diffusion buffers.
+    """
+    model.eval()
+    genre_model.eval()
+
+    # --------------------------------------------------------------
+    # 0) Accept both [..] and [[..]] inputs and unwrap if needed
+    # --------------------------------------------------------------
+    if len(user_item_seq) > 0 and isinstance(user_item_seq[0], (list, tuple)):
+        user_item_seq = user_item_seq[0]
+    if len(user_genre_seq) > 0 and isinstance(user_genre_seq[0], (list, tuple)):
+        user_genre_seq = user_genre_seq[0]
+
+    state_size = model.state_size
+    pad_token_items = model.item_num               # same pad as training
+    pad_token_genres = genre_model.item_num        # pad token for genres
+
+    def pad_or_truncate(seq, max_len, pad_value):
+        seq = list(seq)
+        if len(seq) > max_len:
+            seq = seq[-max_len:]  # keep most recent items
+        if len(seq) < max_len:
+            seq = [pad_value] * (max_len - len(seq)) + seq
+        return seq
+
+    # original (true) lengths before padding
+    len_items = min(len(user_item_seq), state_size)
+    len_genres = min(len(user_genre_seq), state_size)
+
+    # pad/truncate to state_size
+    user_item_seq = pad_or_truncate(user_item_seq, state_size, pad_token_items)
+    user_genre_seq = pad_or_truncate(user_genre_seq, state_size, pad_token_genres)
+
+    # tensors for the main recommender (batch size = 1)
+    states_1 = torch.tensor([user_item_seq], dtype=torch.long, device=device)        # [1, L]
+    len_states_1 = torch.tensor([len_items], dtype=torch.long, device=device)        # [1]
+
+    genre_states_1 = torch.tensor([user_genre_seq], dtype=torch.long, device=device) # [1, L]
+    genre_len_states_1 = torch.tensor([len_genres], dtype=torch.long, device=device) # [1]
+
+    with torch.no_grad():
+        # ----------------------------------------------------------
+        # 1) Build genre conditioning using a FAKE batch size = 2
+        #    to avoid the B=1 issue inside genre_model.cacu_h.
+        # ----------------------------------------------------------
+        B_fake = 2
+
+        # Repeat the same sequence to create a fake batch of size 2
+        genre_states = genre_states_1.repeat(B_fake, 1)      # [2, L]
+        genre_len_states = genre_len_states_1.repeat(B_fake) # [2]
+
+        # pseudo "target genre": last token of each sequence in fake batch
+        genre_target = genre_states[:, -1]                    # [2]
+
+        # x_start for genres
+        genre_x_start = genre_model.cacu_x(genre_target)      # [2, H]
+
+        # conditioning h for genre model (now batch size 2, so cacu_h is safe)
+        genre_h = genre_model.cacu_h(genre_states, genre_len_states, args.p)
+
+        # noise time steps for genre diffusion
+        n_g = torch.randint(
+            low=0,
+            high=genre_diff.timesteps,    # e.g. 500
+            size=(genre_h.size(0),),
+            device=device
+        ).long()
+
+        # diffusion over genres: get predicted_x for both fake samples
+        _, genre_predicted_x_batch = genre_diff.p_losses(
+            genre_model,
+            genre_x_start,
+            genre_h,
+            n_g,
+            loss_type='l2'
+        )   # [2, H]
+
+        # use only the first example as conditioning for our single user
+        genre_predicted_x = genre_predicted_x_batch[:1, :]    # [1, H]
+
+        # ----------------------------------------------------------
+        # 2) Call MovieTenc.predict with batch size = 1
+        # ----------------------------------------------------------
+        logits = model.predict(
+            states_1,
+            len_states_1,
+            diff,
+            genre_predicted_x
+        )  # [1, item_num]
+
+        probs = F.softmax(logits, dim=-1)                    # [1, item_num]
+        top_scores, top_indices = torch.topk(probs, topk, dim=1)
+
+    recommended_item_ids = top_indices.squeeze(0).tolist()
+    recommended_scores   = top_scores.squeeze(0).tolist()
+    return recommended_item_ids, recommended_scores
+
+
+
 ##############################################################################
 #                  EVALUATION LOGIC                      #
 ##############################################################################
+from sklearn.model_selection import KFold
 
 def evaluate(model, genre_model, genre_diff, test_data, diff, device):
-    eval_data = pd.read_pickle(os.path.join(data_directory, test_data))
+    global noise_conditional_loss
+    if type(test_data) == str:
+      eval_data = pd.read_pickle(os.path.join(data_directory, test_data))
+    else:
+      eval_data = test_data
+      
     batch_size = 128
     topk = [5, 10, 20]
     total_samples = 0
@@ -687,14 +916,15 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
 
         # Predict items
         noise = torch.randn_like(x_start)
-
-        _, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, noise=noise, loss_type='l2')
+        loss1, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, noise=noise, loss_type='l2')
         noise_level = (n.float() + 1) / args.timesteps  # Scale to [0, 1]
         predicted_items = model.decoder(predicted_x)
+        # predicted_items = model.predict(seq_batch, len_seq_batch, diff, genre_predicted_x)
         noise_loss = noise_conditional_loss(predicted_x, noise, noise_level).mean()
-        focal_loss = FocalLoss(alpha=0.5, gamma=2)
-        cross_entropy_loss = focal_loss(model.decoder(predicted_x), target_batch)
-        loss = (args.alpha * noise_loss + (1 - args.alpha) * cross_entropy_loss) / 2
+        # focal_loss = FocalLoss(alpha=0.08, gamma=8)
+        loss_function = nn.CrossEntropyLoss()
+        loss2 = loss_function(predicted_items, target_batch)
+        loss = (args.alpha*loss1) + ((1-args.alpha)*loss2)
         losses.append(loss.item())
 
         # Get top-k predictions
@@ -720,203 +950,517 @@ def evaluate(model, genre_model, genre_diff, test_data, diff, device):
     return avg_loss, hr_list.tolist(), ndcg_list.tolist()
 
 
+# -------------------------------------------------------------------------
+# Helper: build genre predictor (frozen)
+# -------------------------------------------------------------------------
+def build_genre_model(device, data_directory):
+    """Build and load the frozen genre predictor + its diffusion process."""
+
+    genres_data_statis = pd.read_pickle(os.path.join(data_directory, 'data_statis_g.df'))
+    genres_seq_size = genres_data_statis['seq_size'][0]
+    genres_item_num = genres_data_statis['item_num'][0]
+
+    genre_model = Tenc(
+        args.hidden_factor,
+        genres_item_num,
+        genres_seq_size,
+        args.dropout_rate,
+        args.diffuser_type,
+        device
+    )
+    genre_diff = diffusion(500, args.beta_start, args.beta_end, args.w)
+
+    # Load pre-trained checkpoint
+    genre_model, genre_diff = load_genres_predictor(genre_model)
+    genre_model.eval()
+
+    # Freeze genre model
+    for p in genre_model.parameters():
+        p.requires_grad = False
+
+    genre_model.to(device)
+    return genre_model, genre_diff
+
+
+# -------------------------------------------------------------------------
+# Helper: build main MovieTenc model and optimizer
+# -------------------------------------------------------------------------
+def build_movie_model_and_optimizer(device, data_directory):
+    """Build MovieTenc model, its diffusion process, and optimizer."""
+
+    data_statis = pd.read_pickle(os.path.join(data_directory, 'data_statis.df'))
+    seq_size = data_statis['seq_size'][0]
+    item_num = data_statis['item_num'][0]
+
+    model = MovieTenc(
+        args.hidden_factor,
+        item_num,
+        seq_size,
+        args.dropout_rate,
+        args.diffuser_type,
+        device
+    )
+    diff = MovieDiffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
+
+    # Choose optimizer based on args.optimizer
+    if args.optimizer == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
+    elif args.optimizer == 'adamw':
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
+    elif args.optimizer == 'adagrad':
+        optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
+    elif args.optimizer == 'rmsprop':
+        optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
+
+    model.to(device)
+    return model, diff, optimizer
+
+
+# -------------------------------------------------------------------------
+# Core training loop used by both single and k-fold training
+# -------------------------------------------------------------------------
+def train_one_setting(
+        model,
+        diff,
+        genre_model,
+        genre_diff,
+        train_loader,
+        val_file,      # <--- filename like 'val_data.df' or tmp fold file
+        device,
+        max_epochs,
+        eval_interval,
+        optimizer,
+        scheduler=None,
+        is_tuning=False
+):
+    """
+    Train a single setting (either a fold or the single run).
+    - Uses `evaluate(model, genre_model, genre_diff, val_file, diff, device)`.
+    - Returns history with train_loss and val metrics (@10) for plotting.
+    """
+
+    # To record metrics for plotting later
+    history = {
+        "train_loss": [],   # per epoch
+        "val_loss": [],     # per eval step
+        "val_hr": [],       # HR@10
+        "val_ndcg": [],     # NDCG@10
+        "eval_epochs": []
+    }
+
+    # Use HR@10 / NDCG@10 (index 1 for topk=[5,10,20])
+    K_INDEX = 1
+
+    early_stopper = EarlyStopper(patience=5, higher_better=True)
+    global noise_conditional_loss
+    noise_conditional_loss = NoiseConditionalScoreLoss()
+    # focal_loss_fn = FocalLoss(alpha=0.5, gamma=2)
+    loss_function = nn.CrossEntropyLoss()
+
+    for epoch in range(max_epochs):
+        model.train()
+        epoch_loss_sum = 0.0
+        num_batches = 0
+
+        start_time = Time.time()
+
+        for batch_data in train_loader:
+            seq_batch, len_seq_batch, target_batch, genre_seq_batch, genre_target_batch = batch_data
+
+            seq_batch = seq_batch.to(device)
+            len_seq_batch = len_seq_batch.to(device)
+            target_batch = target_batch.to(device)
+            genre_seq_batch = genre_seq_batch.to(device)
+            genre_target_batch = genre_target_batch.to(device)
+
+            optimizer.zero_grad()
+
+            # Compute x_start and conditioning for diffusion
+            x_start = model.cacu_x(target_batch)
+            n = torch.randint(0, args.timesteps, (seq_batch.shape[0],), device=device).long()
+            h = model.cacu_h(seq_batch, len_seq_batch, args.p)
+
+            # Genre predictor branch
+            n_g = torch.randint(0, 500, (seq_batch.shape[0],), device=device).long()
+            genre_x_start = genre_model.cacu_x(genre_target_batch)
+            genre_h = genre_model.cacu_h(genre_seq_batch, len_seq_batch, args.p)
+            _, genre_predicted_x = genre_diff.p_losses(
+                genre_model, genre_x_start, genre_h, n_g, loss_type='l2'
+            )
+
+            # Diffusion + cross-entropy
+            noise = torch.randn_like(x_start)
+            loss1 , predicted_x = diff.p_losses(
+                model, x_start, h, n, genres_embd=genre_predicted_x, noise=noise, loss_type='l2'
+            )
+
+            # noise_level = (n.float() + 1) / args.timesteps
+            predicted_items = model.decoder(predicted_x)
+
+            # noise_loss = noise_conditional_loss(predicted_x, noise, noise_level).mean()
+            # cross_entropy_loss = focal_loss_fn(predicted_items, target_batch)
+
+            # # Combine diffusion loss and CE loss using args.alpha
+            # loss = (args.alpha * noise_loss + (1 - args.alpha) * cross_entropy_loss) / 2.0
+            # loss.backward()
+            # optimizer.step()
+            # predicted_items = model.decoder(predicted_x)
+            # predicted_items = model.predict(seq_batch, len_seq_batch, diff, genre_predicted_x)
+            # focal_loss = FocalLoss(alpha=0.08, gamma=8)
+            loss2 = loss_function(predicted_items, target_batch)
+            loss = (args.alpha*loss1) + ((1-args.alpha)*loss2)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss_sum += loss.item()
+            num_batches += 1
+
+        # Average training loss for this epoch
+        epoch_loss_avg = epoch_loss_sum / max(1, num_batches)
+        history["train_loss"].append(epoch_loss_avg)
+
+        if args.report_epoch:
+            print(
+                f"Epoch {epoch:03d}; "
+                f"Train loss: {epoch_loss_avg:.4f}; "
+                f"Time: {Time.strftime('%H: %M: %S', Time.gmtime(Time.time() - start_time))}"
+            )
+
+        # Validation / evaluation step
+        if (epoch + 1) % eval_interval == 0:
+            eval_start = Time.time()
+            model.eval()
+            with torch.no_grad():
+                print('-------------------------- VAL PHASE --------------------------')
+                # NOTE: val_file is a filename; evaluate will read from disk
+                avg_loss, hr_list, ndcg_list = evaluate(
+                    model, genre_model, genre_diff, val_file, diff, device
+                )
+                print(
+                    "Evaluation cost: " +
+                    Time.strftime("%H: %M: %S", Time.gmtime(Time.time() - eval_start))
+                )
+                print('----------------------------------------------------------------')
+
+            # Use HR@10 and NDCG@10 as scalar metrics for tuning
+            hr_at10 = float(hr_list[K_INDEX])
+            ndcg_at10 = float(ndcg_list[K_INDEX])
+
+            history["val_loss"].append(float(avg_loss))
+            history["val_hr"].append(hr_at10)
+            history["val_ndcg"].append(ndcg_at10)
+            history["eval_epochs"].append(epoch + 1)
+
+            # Optional LR scheduler with validation loss
+            if scheduler is not None:
+                scheduler.step(avg_loss)
+
+            # Early stopping is only meaningful in tuning or long runs
+            if early_stopper.should_stop(hr_at10):
+                print(f"Early stopping triggered at epoch {epoch}")
+                break
+
+    return history
+
+# -------------------------------------------------------------------------
+# Single training (no tuning) + test evaluation
+# -------------------------------------------------------------------------
+def single_train(device, data_directory):
+    """
+    Single training run (no tuning):
+    - Trains on train_data.df
+    - Validates on val_data.df during training
+    - Evaluates on test_data.df once at the end
+    - Saves metrics to results/single_run_metrics.json
+    """
+
+    print("Running single training...")
+
+    # Build models
+    genre_model, genre_diff = build_genre_model(device, data_directory)
+    model, diff, optimizer = build_movie_model_and_optimizer(device, data_directory)
+
+    # Data
+    train_df = pd.read_pickle(os.path.join(data_directory, 'train_data.df'))
+
+    train_dataset = RecDataset(train_df)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
+    # Optional scheduler
+    # scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+
+    # Train, using 'val_data.df' as validation file (evaluate will read it)
+    history = train_one_setting(
+        model=model,
+        diff=diff,
+        genre_model=genre_model,
+        genre_diff=genre_diff,
+        train_loader=train_loader,
+        val_file='val_data.df',
+        device=device,
+        max_epochs=args.epoch,
+        eval_interval=10,
+        optimizer=optimizer,
+        scheduler=None,
+        is_tuning=False
+    )
+
+    # Test evaluation (using test file as requested)
+    print('-------------------------- TEST PHASE -------------------------')
+    model.eval()
+    with torch.no_grad():
+        avg_loss_test, hr_test_list, ndcg_test_list = evaluate(
+            model, genre_model, genre_diff, 'test_data.df', diff, device
+        )
+    print('Test - Loss: {:.4f}'.format(avg_loss_test))
+    print('Test HR:', hr_test_list)
+    print('Test NDCG:', ndcg_test_list)
+    print('----------------------------------------------------------------')
+
+    # Save model (optional)
+    os.makedirs("./models", exist_ok=True)
+    torch.save(model.state_dict(), "./models/tenc_best_single.pth")
+    torch.save(diff, "./models/diff_best_single.pth")
+
+    # Save metrics in an easy-to-plot format
+    os.makedirs("./results", exist_ok=True)
+    single_metrics = {
+        "mode": "single",
+        "hyperparams": {
+            "timesteps": args.timesteps,
+            "lr": args.lr,
+            "optimizer": args.optimizer,
+            "alpha": args.alpha,
+            "batch_size": args.batch_size,
+            "epochs": args.epoch,
+        },
+        "history": history,
+        "test": {
+            "loss": float(avg_loss_test),
+            "hr": hr_test_list,          # list of HR@[5,10,20]
+            "ndcg": ndcg_test_list       # list of NDCG@[5,10,20]
+        }
+    }
+
+    with open("./results/single_run_metrics.json", "w") as f:
+        json.dump(single_metrics, f, indent=2)
+
+    return single_metrics
+
+
+
+
+# -------------------------------------------------------------------------
+# K-Fold training for hyperparameter tuning
+# -------------------------------------------------------------------------
+
+def kfold_train(metrics, device, data_directory):
+    """
+    Hyperparameter tuning with K-Fold:
+    - For each metric (lr, optimizer, timesteps, alpha), and each value,
+      run 5-fold CV.
+    - For each value, store averaged loss, HR@10, NDCG@10 over folds.
+    - Save results to results/tuning_metrics.json for easy plotting.
+    """
+
+    print("Running K-Fold tuning...")
+
+    # Preload global data used for splitting
+    train_df = pd.read_pickle(os.path.join(data_directory, 'train_data.df'))
+    val_df = pd.read_pickle(os.path.join(data_directory, 'val_data.df'))
+    total_data = pd.concat([train_df, val_df], ignore_index=True)
+
+    # Build frozen genre model once
+    genre_model, genre_diff = build_genre_model(device, data_directory)
+
+    kf = KFold(n_splits=5, random_state=1442, shuffle=True)
+
+    # Directory for temporary fold validation files
+    tmp_dir = os.path.join(data_directory, "kfold_tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    for metric in metrics:
+        print(f"=== Tuning {metric.name} ===")
+        for value in metric.values:
+            # Set hyperparameter
+            if metric.name == 'lr':
+                args.lr = value
+            elif metric.name == 'optimizer':
+                args.optimizer = value
+            elif metric.name == 'timesteps':
+                args.timesteps = value
+            elif metric.name == 'alpha':
+                args.alpha = value
+
+            print(f"  -> Value: {value}")
+
+            # Store fold-level metric histories for this hyperparam value
+            fold_histories = []
+
+            for fold_idx, (train_idx, val_idx) in enumerate(kf.split(total_data)):
+                print(f"    Fold {fold_idx + 1}/{kf.get_n_splits()}")
+
+                fold_train_df = total_data.iloc[train_idx]
+                fold_val_df = total_data.iloc[val_idx]
+
+                # Save this fold's validation data to a temporary file
+                val_file_name = f"kfold_val_{metric.name}_{str(value).replace('.', '_')}_fold{fold_idx}.df"
+                val_file_path = os.path.join(tmp_dir, val_file_name)
+                fold_val_df.to_pickle(val_file_path)
+
+                # IMPORTANT: evaluate expects `test_data` relative to `data_directory`
+                # so we pass the relative path from data_directory.
+                rel_val_file = os.path.join("kfold_tmp", val_file_name)
+
+                train_dataset = RecDataset(fold_train_df)
+                train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
+                # Build model + optimizer per fold
+                model, diff, optimizer = build_movie_model_and_optimizer(device, data_directory)
+
+                # Optional scheduler per fold
+                scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+
+                history = train_one_setting(
+                    model=model,
+                    diff=diff,
+                    genre_model=genre_model,
+                    genre_diff=genre_diff,
+                    train_loader=train_loader,
+                    val_file=rel_val_file,
+                    device=device,
+                    max_epochs=args.epoch,
+                    eval_interval=10,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    is_tuning=True
+                )
+                fold_histories.append(history)
+
+            # -----------------------------------------------------------------
+            # Average metrics over folds (aligned by eval_epochs)
+            # -----------------------------------------------------------------
+            # Assume all folds evaluate on the same eval_epochs sequence
+            eval_epochs = fold_histories[0]["eval_epochs"]
+            num_eval_points = len(eval_epochs)
+
+            avg_loss = np.zeros(num_eval_points, dtype=np.float32)
+            avg_hr = np.zeros(num_eval_points, dtype=np.float32)
+            avg_ndcg = np.zeros(num_eval_points, dtype=np.float32)
+
+            for fh in fold_histories:
+                avg_loss += np.array(fh["val_loss"], dtype=np.float32) / len(fold_histories)
+                avg_hr += np.array(fh["val_hr"], dtype=np.float32) / len(fold_histories)
+                avg_ndcg += np.array(fh["val_ndcg"], dtype=np.float32) / len(fold_histories)
+
+            # Store averaged curves in the metric object
+            metric.eval_dict[value] = {
+                "eval_epochs": eval_epochs,
+                "loss": avg_loss,
+                "hr": avg_hr,
+                "ndcg": avg_ndcg
+            }
+
+    # ---------------------------------------------------------------------
+    # Save all tuning results for plotting
+    # ---------------------------------------------------------------------
+    os.makedirs("./results", exist_ok=True)
+
+    tuning_results = {}
+    for metric in metrics:
+        tuning_results[metric.name] = {}
+        for value, series in metric.eval_dict.items():
+            tuning_results[metric.name][str(value)] = {
+                "eval_epochs": series["eval_epochs"],         # list of epochs
+                "loss": series["loss"].tolist(),              # averaged val loss
+                "hr": series["hr"].tolist(),                  # averaged HR@10
+                "ndcg": series["ndcg"].tolist()               # averaged NDCG@10
+            }
+
+    with open("./results/tuning_metrics.json", "w") as f:
+        json.dump(tuning_results, f, indent=2)
+
+    print("Tuning finished. Results saved to ./results/tuning_metrics.json")
+    return tuning_results
+
+
 ##############################################################################
 #                                MAIN SCRIPT                                 #
 ##############################################################################
 if __name__ == '__main__':
-    # Additional hyperparams not in parse_args:
-    args.alpha = 0.8  # weighting factor for diffusion vs. cross-entropy
 
-    # Create a list of possible metrics to tune if needed
-    if args.tune:
-        from collections import defaultdict
-
-
-        class Metric:
-            def __init__(self, name, values):
-                self.name = name
-                self.values = values
-                self.eval_dict = defaultdict(list)
-                self.bestOne = None
-
-            def find_max_one(self):
-                best = -np.inf
-                for key in self.eval_dict.keys():
-                    temp = max(self.eval_dict[key])
-                    if temp > best:
-                        self.bestOne = key
-                        best = temp
-
-            def find_min_one(self):
-                best = np.inf
-                for key in self.eval_dict.keys():
-                    temp = min(self.eval_dict[key])
-                    if temp < best:
-                        self.bestOne = key
-                        best = temp
-
-
-        metrics = [
-            Metric(name='timesteps', values=[i * 100 for i in range(1, 11)]),
-            Metric(name='lr', values=[0.1, 0.01, 0.001, 0.0001, 0.00001]),
-            Metric(name='optimizer', values=['adam', 'adamw', 'adagrad', 'rmsprop']),
-            Metric(name='alpha', values=[i * 0.05 for i in range(1, 21)])
-        ]
-        best_metrics = []
-    else:
-        args.lr = .001
-        args.optimizer = 'adam'
-        args.alpha = 0.8
-        metrics = [
-            # We test only a single value for timesteps, for example
-            # Adjust as needed
-            dict(name='timesteps', values=[500]),
-        ]
-        # we can store them in a simpler structure
-        best_metrics = []
+    args.alpha = 0.8  # default weighting factor for diffusion vs. cross-entropy
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     data_directory = './data/' + args.data
 
-    # We'll just do a single run if not tuning
-    for metric in metrics:
-        # Possibly read bestOne from a previous step. Omitted for brevity.
+    if args.train:
+      # Additional hyperparams not in parse_args:
 
-        for value in metric['values']:
-            # set the appropriate param
-            if metric['name'] == 'lr':
-                args.lr = value
-            elif metric['name'] == 'optimizer':
-                args.optimizer = value
-            elif metric['name'] == 'timesteps':
-                args.timesteps = value
-            elif metric['name'] == 'alpha':
-                args.alpha = value
+      if args.tune:
+          from collections import defaultdict
 
-            # read stats
-            data_statis = pd.read_pickle(os.path.join(data_directory, 'data_statis.df'))
-            seq_size = data_statis['seq_size'][0]
-            item_num = data_statis['item_num'][0]
+          class Metric:
+              def __init__(self, name, values):
+                  self.name = name
+                  self.values = values
+                  self.eval_dict = defaultdict(dict)
+                  self.bestOne = None
 
-            # read genre stats
-            genres_data_statis = pd.read_pickle(os.path.join(data_directory, 'data_statis_g.df'))
-            genres_seq_size = genres_data_statis['seq_size'][0]
-            genres_item_num = genres_data_statis['item_num'][0]
+              def find_max_one(self):
+                  """Find value with maximum best HR@10."""
+                  best = -np.inf
+                  best_key = None
+                  for key, v in self.eval_dict.items():
+                      temp = float(np.max(v["hr"]))  # hr is HR@10 curve
+                      if temp > best:
+                          best = temp
+                          best_key = key
+                  self.bestOne = best_key
 
-            # Construct model & diffusion
-            model = MovieTenc(args.hidden_factor, item_num, seq_size, args.dropout_rate,
-                              args.diffuser_type, device)
-            diff = MovieDiffusion(args.timesteps, args.beta_start, args.beta_end, args.w)
+              def find_min_one(self):
+                  """Find value with minimum best loss (if needed)."""
+                  best = np.inf
+                  best_key = None
+                  for key, v in self.eval_dict.items():
+                      temp = float(np.min(v["loss"]))
+                      if temp < best:
+                          best = temp
+                          best_key = key
+                  self.bestOne = best_key
 
-            # Load the genre model
-            genre_model = Tenc(args.hidden_factor, genres_item_num, genres_seq_size,
-                               args.dropout_rate, args.diffuser_type, device)
-            genre_diff = diffusion(500, args.beta_start, args.beta_end, args.w)
+          # Define hyperparameter search space
+          metrics = [
+              Metric(name='alpha', values=[i * 0.1 for i in range(1, 11)]),
+              Metric(name='timesteps', values=[i * 50 for i in range(1, 6)]),
+              Metric(name='lr', values=[0.1, 0.01, 0.001, 0.0001, 0.00001]),
+              Metric(name='optimizer', values=['adam', 'adamw', 'adagrad', 'rmsprop']),
+          ]
 
-            # Load pre-trained
-            genre_model, genre_diff = load_genres_predictor(genre_model)
-            genre_model.eval()
-            # freeze genre model
-            for param in genre_model.parameters():
-                param.requires_grad = False
+          kfold_train(metrics, device, data_directory)
 
-            # Choose optimizer
-            if args.optimizer == 'adam':
-                optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
-            elif args.optimizer == 'adamw':
-                optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
-            elif args.optimizer == 'adagrad':
-                optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
-            elif args.optimizer == 'rmsprop':
-                optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
-            else:
-                optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-6, weight_decay=args.l2_decay)
+          # Optionally: choose best hyperparameters (e.g., by HR@10)
+          for m in metrics:
+              m.find_max_one()
+              print(f"Best {m.name}: {m.bestOne}")
 
-            scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+      else:
+          # Fixed hyperparameters for a single run (adjust as needed)
+          # args.lr = 0.01
+          # args.optimizer = 'adamw'
+          args.alpha = 0.8
+          # args.timesteps = 100  # single value
 
-            model.to(device)
-            genre_model.to(device)
-            train_data = pd.read_pickle(os.path.join(data_directory, 'train_data.df'))
-            train_dataset = RecDataset(train_data)
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-            hr_max = 0
-            best_epoch = 0
-            early_stopper = EarlyStopper(patience=5, higher_better=True)
-            for epoch in range(args.epoch):
-                if epoch < 20:
-                    alpha = 0.8
-                else:
-                    alpha = 0.95
-                start_time = Time.time()
-                model.train()
-                for batch_data in train_loader:
-                    seq_batch, len_seq_batch, target_batch, genre_seq_batch, genre_target_batch = batch_data
-                    seq_batch = seq_batch.to(device)
-                    len_seq_batch = len_seq_batch.to(device)
-                    target_batch = target_batch.to(device)
-                    genre_seq_batch = genre_seq_batch.to(device)
-                    genre_target_batch = genre_target_batch.to(device)
-                    optimizer.zero_grad()
+          single_train(device, data_directory)
 
-                    x_start = model.cacu_x(target_batch)
-                    n = torch.randint(0, args.timesteps, (seq_batch.shape[0],), device=device).long()
-                    h = model.cacu_h(seq_batch, len_seq_batch, args.p)
-                    n_g = torch.randint(0, 500, (seq_batch.shape[0],), device=device).long()
-                    genre_x_start = genre_model.cacu_x(genre_target_batch)
-                    genre_h = genre_model.cacu_h(genre_seq_batch, len_seq_batch, args.p)
-                    _, genre_predicted_x = genre_diff.p_losses(
-                        genre_model, genre_x_start, genre_h, n_g, loss_type='l2'
+      print("All done!")
+    
+    else:
+      recommendations = suggest_items(user_items = [[1201, 2028, 2947, 2366, 1240, 3418, 1214, 3702, 1036, 2951]], \
+                        user_genres = [[8, 16, 8, 8, 9, 8, 11, 9, 8, 8]],
+                        device=device
                     )
-
-                    # diffusion + cross-entropy
-                    noise = torch.randn_like(x_start)
-
-                    _, predicted_x = diff.p_losses(model, x_start, h, n, genres_embd=genre_predicted_x, noise=noise,
-                                                   loss_type='l2')
-                    noise_level = (n.float() + 1) / args.timesteps
-                    predicted_items = model.decoder(predicted_x)
-                    noise_conditional_loss = NoiseConditionalScoreLoss()
-
-                    noise_loss = noise_conditional_loss(predicted_x, noise, noise_level).mean()
-                    focal_loss = FocalLoss(alpha=0.5, gamma=2)
-                    cross_entropy_loss = focal_loss(model.decoder(predicted_x), target_batch)
-                    loss = (args.alpha * noise_loss + (1 - args.alpha) * cross_entropy_loss) / 2
-                    loss.backward()
-                    optimizer.step()
-
-                # optional: scheduler.step() at each epoch
-                # scheduler.step()
-
-                if args.report_epoch:
-                    if epoch % 1 == 0:
-                        print("Epoch {:03d}; Train loss: {:.4f}; Time: {}".format(
-                            epoch, loss.item(),
-                            Time.strftime("%H: %M: %S", Time.gmtime(Time.time() - start_time))
-                        ))
-
-                if (epoch + 1) % 10 == 0:
-                    eval_start = Time.time()
-                    model.eval()
-                    with torch.no_grad():
-                        print('-------------------------- VAL PHASE --------------------------')
-                        avg_loss, hr_val, ndcg_val = evaluate(model, genre_model, genre_diff, 'val_data.df', diff,
-                                                              device)
-                        print('-------------------------- TEST PHASE -------------------------')
-                        _, hr_test, _ = evaluate(model, genre_model, genre_diff, 'val_data.df', diff, device)
-
-                        print("Evaluation cost: " + Time.strftime(
-                            "%H: %M: %S", Time.gmtime(Time.time() - eval_start))
-                              )
-                        print('----------------------------------------------------------------')
-                        scheduler.step(avg_loss)
-
-                        if early_stopper.should_stop(hr_val):
-                            print(f"Early stopping triggered at epoch {epoch}")
-                            break
-
-                        if not args.tune:
-                            torch.save(model.state_dict(), f"./models/tencV{epoch}.pth")
-                            torch.save(diff, f"./models/diffV{epoch}.pth")
-
-    print("All done!")
+      print(recommendations)
